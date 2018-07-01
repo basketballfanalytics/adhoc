@@ -1,0 +1,228 @@
+---
+title: "Play Type Exploration"
+author: "Basketball Fanalyst"
+date: "5/18/2018"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(nbaTools)
+library(tidyverse)
+```
+
+```{r GetPlayTypeStats}
+# ------------------------------------------------------------------------------
+# Load data
+
+# The values for play category
+play_type_list <- c(
+  "transition",
+  "isolation",
+  "prballhandler",
+  "prrollman",
+  "postup",
+  "spotup",
+  "handoff",
+  "cut",
+  "offscreen",
+  "offrebound",
+  "misc"
+)
+
+
+# ------------------------------------------------------------------------------
+# Pull team data 
+
+# A wrapper around GetPlayTypeStats() that cleans the data bit
+pull_play_types <- function (playtype, pulltype = "team", seasonyr = 2018) {
+  as.tibble(GetPlayTypeStats(type = pulltype, 
+                             category = playtype, 
+                             season = seasonyr)) %>%
+    mutate(
+      frequency = Time / 100,
+      FG_rate = FG / 100,
+      eFG_rate = aFG / 100,
+      FT_rate = FT / 100,
+      TO_rate = TO / 100,
+      SF_rate = SF / 100,
+      and_one_rate = PlusOne / 100,
+      score_rate = Score / 100,
+      play_type = playtype)
+}
+
+team_stats <- map(play_type_list, pull_play_types) %>%
+  bind_rows() %>%
+  complete(TeamNameAbbreviation, play_type)
+
+team_stats[is.na(team_stats)] <- 0
+
+# ------------------------------------------------------------------------------
+# Compute aggregates and normalize PPP data
+
+league_net_ppp <- sum(team_stats$Points) / sum(team_stats$Poss)
+
+team_stats$net_normalized_PPP <- (team_stats$PPP - league_net_ppp) / sd(team_stats$PPP)
+
+team_stats$play_type <- as.factor(team_stats$play_type)
+
+play_type_league_ppp <- team_stats %>%
+  group_by(play_type) %>%
+  summarise(play_type_league_PPP = sum(Points) / sum(Poss))
+
+team_stats <- team_stats %>%
+  inner_join(play_type_league_ppp, by = "play_type")
+
+team_stats$play_type <- fct_reorder(team_stats$play_type, team_stats$play_type_league_PPP)
+
+team_stats$play_normalized_PPP <- (team_stats$PPP - team_stats$play_type_league_PPP) / sd(team_stats$PPP)
+
+
+
+
+
+#TEST PLOT
+ggplot(team_stats %>% filter(TeamNameAbbreviation %in% c("BOS","GSW")),
+       aes(x = play_type, 
+           y = frequency, 
+           fill = net_normalized_PPP)) +
+  geom_bar(stat = "identity") +
+  geom_text(
+    aes(y = frequency - 0.05, 
+        label = ifelse(frequency > 0.10, 
+                       scales::percent(round(frequency,digits = 2)), 
+                       NA))) +
+  coord_polar() +
+  scale_fill_gradient2(low = scales::muted("orange")) +
+  facet_wrap(~TeamNameAbbreviation) +
+  theme_dark() +
+  theme(
+    panel.background = element_rect(fill = "grey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+
+# ------------------------------------------------------------------------------
+# Aggregate Team data to league 
+
+league_stats <- team_stats %>%
+  group_by(play_type) %>%
+  summarise(
+    Poss = sum(Poss),
+    Points = sum(Points),
+    PPP = Points / Poss,
+    FG_rate = sum(FG_rate * Poss) / sum(Poss),
+    eFG_rate = sum(eFG_rate * Poss) / sum(Poss),
+    FT_rate = sum(FT_rate * Poss) / sum(Poss),
+    TO_rate = sum(TO_rate * Poss) / sum(Poss),
+    SF_rate = sum(SF_rate * Poss) / sum(Poss),
+    and_one_rate = sum(and_one_rate * Poss) / sum(Poss),
+    score_rate = sum(score_rate * Poss) / sum(Poss)) %>%
+  mutate(
+    frequency = Poss / sum(Poss),
+    PPP_score = PPP - mean(PPP))
+
+
+# ------------------------------------------------------------------------------
+# Pull player data 
+
+player_stats <- map(play_type_list, pull_play_types, pulltype = "player") %>%
+  bind_rows() %>%
+  complete(PlayerIDSID, play_type)
+
+player_stats[is.na(player_stats)] <- 0
+
+player_stats$net_normalized_PPP <- (player_stats$PPP - league_net_ppp) / sd(player_stats$PPP)
+
+player_stats$play_type <- as.factor(player_stats$play_type)
+
+player_stats <- player_stats %>%
+  inner_join(play_type_league_ppp, by = "play_type")
+
+player_stats$play_type <- fct_reorder(player_stats$play_type, player_stats$play_type_league_PPP)
+
+player_stats$play_normalized_PPP <- (player_stats$PPP - player_stats$play_type_league_PPP) / sd(player_stats$PPP)
+
+# player_stats <- player_stats %>%
+#   inner_join(temp_df, by = "play_type") %>%
+#   mutate(
+#     PPP = PPP.x,
+#     PPP_delta = PPP.x - PPP.y,
+#     PPP_z_score = (PPP.x - PPP.y) / sd(PPP.x - PPP.y),
+#     PPP_tot_z_score = (PPP.x - league_ppp) / sd(PPP.x)
+#     ) %>%
+#   select(-PPP.x, -PPP.y)
+# player_pull <- function (playtype, seasonyr = 2018) {
+#   as.tibble(GetPlayTypeStats(type = 'player', category = playtype, season = seasonyr)) %>%
+#     mutate(
+#       frequency = Time / 100,
+#       FG_rate = FG / 100,
+#       eFG_rate = aFG / 100,
+#       FT_rate = FT / 100,
+#       TO_rate = TO / 100,
+#       SF_rate = SF / 100,
+#       and_one_rate = PlusOne / 100,
+#       score_rate = Score / 100,
+#       play_type = playtype
+#     ) %>%
+#     select(
+#       PlayerIDSID,
+#       PlayerFirstName,
+#       PlayerLastName,
+#       P,
+#       TeamIDSID,
+#       TeamName,
+#       TeamNameAbbreviation,
+#       season,
+#       play_type,
+#       GP,
+#       Poss,
+#       Points,
+#       FGA,
+#       FGM,
+#       PPP,
+#       frequency,
+#       FG_rate,
+#       eFG_rate,
+#       FT_rate,
+#       TO_rate,
+#       SF_rate,
+#       and_one_rate,
+#       score_rate
+#     )
+# }
+
+
+# ------------------------------------------------------------------------------
+# Plots 
+# ------------------------------------------------------------------------------
+
+rose_plot <- function(df) {
+  ggplot(
+    df,
+    aes(x = play_type, 
+        y = frequency, 
+        fill = net_normalized_PPP
+    )
+  ) +
+  geom_bar(stat = "identity") +
+  coord_polar() +
+  scale_fill_gradient2()
+}
+
+rose_plot(player_stats[player_stats$PlayerLastName=="Durant",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Curry",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Irving",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Smart",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Horford",])
+
+
+```
+
+
+```{r league_summary}
+
+
+```

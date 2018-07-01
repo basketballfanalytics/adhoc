@@ -1,0 +1,441 @@
+---
+title: "nbaTools Package Exploration"
+author: "Basketball Fanalyst"
+date: "5/16/2018"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(nbaTools)
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(RColorBrewer)
+
+testgameid <- "0041700302" # Game 2 of the ECF (5/15/2018), BOS 104-97 CLE 
+testplayerid <- "1628369"  # Jayson Tatum
+```
+
+#Source Code
+
+The [source code](https://github.com/ccagrawal/nbaTools) is an important reference, because it allows us find the available parameters and defaults for each function. 
+
+###HTTP Headers
+The source code will make more sense with a basic understanding of HTTP.  [HTTP Headers for Dummies](https://code.tutsplus.com/tutorials/http-headers-for-dummies--net-8039) is a useful and concise explanation. 
+
+###GetPlayerHustleStats example
+
+Take the __GetPlayerHustleStats__ function as an example. We don't know the available parameters for this function or their default values. We also do not know the definitions of the data; what does '15 contested shots' mean? Is that in one season? One game? Per 36 minutes? Let's explore the source code to answer these question: 
+
+  * We go to the [source code](https://github.com/ccagrawal/nbaTools) and navigate to the [/R directory](https://github.com/ccagrawal/nbaTools/tree/master/R). It's not clear which script contains the definition of __GetPlayerHustleStats__, so we search for _hustle_ and find that __GetPlayerHustleStats__ is defined in [league_scrape.R](https://github.com/ccagrawal/nbaTools/blob/master/R/league_scrape.R)
+  
+  * __GetPlayerHustleStats__ defines some parameters and then returns a function __GetData__ that we will investigate next, but first let's understand the parameters defined in __GetPlayerHustleStats__ and passed to __GetData__:
+  
+    1. `endpoint <- 'leaguehustlestatsplayer'`
+    
+        * The endpoint is used in determining the URL. We can try to manually generate the request in a browser: [https://stats.nba.com/stats/leaguehustlestatsplayer](https://stats.nba.com/stats/leaguehustlestatsplayer). We will get an error indicating that we are missing some required parameters: "The LeagueID property is required.; Season is required; SeasonType is required; PerMode is required". Default values are defined for these somewhere in the code, more on this later.
+      
+    2. `referer <- 'players/hustle'`
+    
+        * The referer is an HTTP header that indicates the source of this request. For example, if we click a link on espn.com, that will generate an HTTP request with a header like `referer: www.espn.com`.
+        
+        * So what does 'players/hustle' mean as the HTTP referer here? More on this when we find default values.
+      
+    3. `ix <- 1`
+    
+        * 'ix' probably stands for 'index'. It is used to determine the position of the desired content in the list returned by __ScrapeContent__ (see below).
+      
+    4. `param.keys`
+                  
+        * This is a list of the parameters that can be passed to the guery in the HTTP GET request. It is important to know what the default values are for these.
+      
+    5. Also notice that `source = "NBA"` is passed as a parameter. This package scrapes from multiple sites (e.g. nba.com, basketball-reference), and some functions behave differently depending on the source website. __GetPlayerHustleStats__ is a simple example as hustle stats are only available at stats.NBA.com.
+      
+  * Now that we understand the parameters, let's figure out the function that they get passed to: __GetData__. The defnition is found in [scrape.R](https://github.com/ccagrawal/nbaTools/blob/master/R/scrape.R). This function has 3 basic steps:
+  
+    1. `params <- GenerateParams(param.keys, source, ...)`
+        
+        * This function creates a list of key-value pairs by looping through the param.keys and finding their default value in _kDefaultParams_ from [constants.R](https://github.com/ccagrawal/nbaTools/blob/master/R/constants.R). It then replaces those default values with any values explicitly provided in the function call (the kwargs). Looking at the list _kDefaultParams_ shows us the default values provided for our 4 required parameters
+            * `LeagueID = '00'`  
+            * `Season = kSeason # kYear <- CurrentYear(); kSeason <- YearToSeason(kYear)` This will result in '2017-18'
+            * `SeasonType = 'Regular Season'`
+            * `PerMode = 'PerGame'`
+            
+        * Let's add these defaults as parameter values and try again to manually make the HTTP request in a browser: [https://stats.nba.com/stats/leaguehustlestatsplayer?LeagueID=00&Season=2017-18&SeasonType=Regular%20Season&PerMode=PerGame](https://stats.nba.com/stats/leaguehustlestatsplayer?LeagueID=00&Season=2017-18&SeasonType=Regular%20Season&PerMode=PerGame). Success!
+          
+          
+    2. `content <- ScrapeContent(endpoint, params, referer, source)`
+    
+        * Uses the httr package to scrape for data. We are combining our defaults with the information passed by the user and making an HTTP GET request.
+        
+        * This is also where the _referer_ gets used. We can see that __ScrapeContent__ loads the defaults in _kHeaders_ which includes `'Referer' = 'http://stats.nba.com/%referer%/',`. We then substitute in our _referer_ value of 'players/hustle' resulting in a referer url of [http://stats.nba.com/players/hustle/](http://stats.nba.com/players/hustle/).
+        
+        * Our manually generated URL above generates the same HTTP GET request as __ScrapeContent__ except that it has no referer value. __It's unclear how the spoofed referer impacts the results of the request compared to having no referer__.
+        
+    3. `df <- ContentToDataFrame(content, ix, source)`
+    
+        * Finally, we take the returned data and convert it to a data frame. This df is returned as the final result of __GetPlayerHustleStats__.
+        
+        * Note: This function contains some if logic based on the _source_ that determines how to use _ix_ to extract the desired results from the _content_ returned by __ScrapeContent__.
+
+```{r hustleexample}
+as.tibble(GetPlayerHustleStats())
+```
+
+# Functions
+This package has a 28 functions with help pages in documentation. The first goal here is to explore those functions and see what kind of data we get back. The functions are inconsistent in names and required variables, so I'll go through them manually to understand them.
+
+
+__GetBoxScore__ gets basic box stats from stats.nba.com. It gives play time to the second (at least for recent games). Note that there is a player_id column that stats.nba probably uses to index all players. We have some fun with ggplot to show some of this data
+
+```{r GetBoxScore}
+boxscore <- as.tibble(GetBoxScore(GameID = testgameid))
+boxscore %>%
+  ggplot(aes(x = as.numeric(ms(MIN)), y = PLUS_MINUS)) +
+    geom_point(aes(color = TEAM_ABBREVIATION), size = 2) +
+    ggrepel::geom_label_repel(
+      aes(label = PLAYER_NAME)
+    ) +
+    geom_smooth(aes(color = TEAM_ABBREVIATION), se = FALSE) +
+    labs(
+      y = "Plus/Minus",
+      x = "Seconds Played",
+      title = "Box Score ECF Game 2 - 5/15/2018",
+      subtitle = "Plotting Plus/Minus vs. Time Played",
+      color = "Team",
+      caption = "Data from stats.nba.com"
+    ) +
+    scale_color_manual(
+      values = c(BOS = "#33A02C", CLE = "#E41A1C")
+    ) +
+    geom_line(y = 0, color = "black") +
+    theme_minimal()
+```
+
+__GetGameLogs__ returns a record for each game a player played in, with their box stats for that game
+
+__GetGames__ takes a date variable and returns a list of game_ids for that date
+
+__GetLineups__ gets the play-by-play and includes the IDs of all 10 players on the floor for each event. This is potentially a very powerful dataset, could be used to model probabilities based on matchups. There are numerous descriptive columns, but it seems that EVENTMSGTYPE and EVENTMSGACTIONTYPE are the key indicator fields that would need to be decoded for this data to make sense. We will need to decipher these codes and build a mapping to something readable.
+
+```{r GetLineups}
+lineups <- as.tibble(GetLineups(testgameid))
+lineups
+
+eventmsgtype_sum <- lineups %>%
+  group_by(EVENTMSGTYPE) %>%
+  summarize(count = n())
+eventmsgtype_sum
+
+eventmsgactiontype_sum <- lineups %>%
+  group_by(EVENTMSGACTIONTYPE) %>%
+  summarize(count = n())
+eventmsgactiontype_sum
+```
+
+__GetLineupStats__ returns a record with accumulated stats for each grouping of 5 players. This is a summarized version of GetLineups that ignores the opponent's lineup
+
+__GetPlayByPlay__ seems to be the same as GetLineups but without the 10 player_ids attached to every event.
+
+__GetPlayerBioStats__ returns stuff like age, height, weight, draft status, college, nationality
+
+__GetPlayerClutchStats__ returns pretty standard player stats where the default value for clutch is 'last 5 minutes'
+
+__GetPlayerDefenseStats__ doesn't have very many variables, and they don't seem promising
+
+__GetPlayerGameLogs__ seems redundant with GetGameLogs
+
+__GetPlayerHustleStats__ has some player level summaries of interesting data points such as contested shots, charges drawn, deflections, loose balls recovered, screen assists, box outs. Default is per-game stats.
+
+```{r GetPlayerHustleStats}
+playerhustlestats <- as.tibble(GetPlayerHustleStats(seasonType = "Regular", PerMode = "PerGame"))
+
+
+#Cheap function mapping to get a nice dataset for plotting
+reorder_size <- function(x) {
+  factor(x, levels = names(sort(table(x))))
+}
+
+getleaders <- function(stat, topn = 10) {
+  df <- playerhustlestats %>% 
+    mutate_(value = stat) %>%
+    mutate(statistic = stat) %>%
+    select(PLAYER_NAME, statistic, value) %>%
+    top_n(topn, value) %>%
+    arrange(desc(value))
+  
+  plot <- 
+    ggplot(
+       df, 
+       aes(x = reorder(PLAYER_NAME, -value), y = value)) +
+    geom_col() + 
+    labs(
+      x = "Player",
+      title = paste0(
+        "Top 10 Players at ", str_replace_all( str_to_lower(stat), fixed("_"), " "), " per game"
+        )
+    ) + 
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+   
+   list(df, plot)
+}
+
+# List of stats that we want to get top 10 leaders for
+statlist <- c(
+  "CONTESTED_SHOTS", 
+  "CONTESTED_SHOTS_2PT",
+  "CONTESTED_SHOTS_3PT",
+  "CHARGES_DRAWN",
+  "DEFLECTIONS",
+  "LOOSE_BALLS_RECOVERED",
+  "SCREEN_ASSISTS",
+  "BOX_OUTS"
+)
+
+out <- map(statlist, getleaders)
+
+out
+```
+
+__GetPlayerIDs__ returns a list of all player_ids with names and years played
+
+__GetPlayerShootingStats__ gives a player level summary of basic shooting stats
+
+__GetPlayerStats__ gives basic summary stats for all players in a season
+
+__GetPlayerYearByYearStats__ gives very basic yearly stats, there's not a lot here
+
+__GetPlayTypeStats__ Promising! Returns accumulated statistics for teams and players for each play type. Some notes:
+
+  * The variables _FT_, _TO_, _SF_, _PlusOne_, and _Score_ contain percentages (they should be divided by 100). So a value of 19.72 in FT indicates that 19.72% of these possessions resulted in free throws (or Turnover, Shooting Foul, And 1, any score). 
+  
+  * The _Time_ variable is called "Frequency" on the website. This is also a percentage indicating the percentage of this player's (or team's) total plays that were of this type. Harden has a 35.1 value for Isolation: 35.1% of his plays were isolations!
+  
+  * [Nylon Calculus article](https://fansided.com/2017/09/08/nylon-calculus-understanding-synergy-play-type-data/) on the play types
+  
+  * Note: I found the possible play types (called 'category' in the code) [here](https://github.com/ccagrawal/sportsTools/blob/90074b81f20b8b228a3b9ae5e3535084718edb61/R/GetSynergyStats.R). This is a very similar package by the same authoer but older, less polished, and more general. It may be a useful reference.
+
+```{r GetPlayTypeStats}
+playtypestats <- as.tibble(GetPlayTypeStats(category = 'Isolation'))
+playtypestats <- arrange(playtypestats, desc(Poss))
+playtypestats
+
+# Took me a while to figure these all out.
+play_type_list <- c(
+  "transition",
+  "isolation",
+  "prballhandler",
+  "prrollman",
+  "postup",
+  "spotup",
+  "handoff",
+  "cut",
+  "offscreen",
+  "offrebound",
+  "misc"
+)
+
+# The goal here is a nightengale rose plot, let's manually put this together for jayson tatum first
+rate_cols <- c("Time", "FG", "aFG", "FT", "TO", "SF", "PlusOne", "Score")
+
+
+# ------------------------------------------------------------------------------
+# Pull team data 
+# ------------------------------------------------------------------------------
+
+team_pull <- function (playtype, seasonyr = 2018) {
+  as.tibble(GetPlayTypeStats(type = 'team', category = playtype, season = seasonyr)) %>%
+    mutate(
+      frequency = Time / 100,
+      FG_rate = FG / 100,
+      eFG_rate = aFG / 100,
+      FT_rate = FT / 100,
+      TO_rate = TO / 100,
+      SF_rate = SF / 100,
+      and_one_rate = PlusOne / 100,
+      score_rate = Score / 100,
+      play_type = playtype
+    ) %>%
+    select(
+      TeamIDSID,
+      TeamName,
+      TeamNameAbbreviation,
+      season,
+      play_type,
+      Poss,
+      Points,
+      FGA,
+      FGM,
+      PPP,
+      frequency,
+      FG_rate,
+      eFG_rate,
+      FT_rate,
+      TO_rate,
+      SF_rate,
+      and_one_rate,
+      score_rate
+    )
+}
+
+team_stats <- map(play_type_list, team_pull)
+team_stats <- bind_rows(team_stats) %>%
+  complete(TeamNameAbbreviation, play_type)
+
+team_stats[is.na(team_stats)] <- 0
+
+# ------------------------------------------------------------------------------
+# Aggregate Team data to league 
+# ------------------------------------------------------------------------------
+
+league_stats <- team_stats %>%
+  group_by(play_type) %>%
+  summarise(
+    Poss = sum(Poss),
+    Points = sum(Points),
+    PPP = Points / Poss,
+    FG_rate = sum(FG_rate * Poss) / sum(Poss),
+    eFG_rate = sum(eFG_rate * Poss) / sum(Poss),
+    FT_rate = sum(FT_rate * Poss) / sum(Poss),
+    TO_rate = sum(TO_rate * Poss) / sum(Poss),
+    SF_rate = sum(SF_rate * Poss) / sum(Poss),
+    and_one_rate = sum(and_one_rate * Poss) / sum(Poss),
+    score_rate = sum(score_rate * Poss) / sum(Poss)
+  ) %>%
+  mutate(
+    frequency = Poss / sum(Poss),
+    PPP_score = PPP - mean(PPP)
+  )
+
+league_ppp <- sum(league_stats$Points) / sum(league_stats$Poss)
+
+# ------------------------------------------------------------------------------
+# Pull player data 
+# ------------------------------------------------------------------------------
+
+player_pull <- function (playtype, seasonyr = 2018) {
+  as.tibble(GetPlayTypeStats(type = 'player', category = playtype, season = seasonyr)) %>%
+    mutate(
+      frequency = Time / 100,
+      FG_rate = FG / 100,
+      eFG_rate = aFG / 100,
+      FT_rate = FT / 100,
+      TO_rate = TO / 100,
+      SF_rate = SF / 100,
+      and_one_rate = PlusOne / 100,
+      score_rate = Score / 100,
+      play_type = playtype
+    ) %>%
+    select(
+      PlayerIDSID,
+      PlayerFirstName,
+      PlayerLastName,
+      P,
+      TeamIDSID,
+      TeamName,
+      TeamNameAbbreviation,
+      season,
+      play_type,
+      GP,
+      Poss,
+      Points,
+      FGA,
+      FGM,
+      PPP,
+      frequency,
+      FG_rate,
+      eFG_rate,
+      FT_rate,
+      TO_rate,
+      SF_rate,
+      and_one_rate,
+      score_rate
+    )
+}
+
+
+player_stats <- map(play_type_list, player_pull)
+player_stats <- bind_rows(player_stats) %>%
+  complete(PlayerIDSID, play_type)
+
+player_stats[is.na(player_stats)] <- 0
+
+temp_df <- league_stats %>%
+  select(play_type,PPP)
+
+league_ppp <- sum(league_stats$Points) / sum(league_stats$Poss)
+
+player_stats <- player_stats %>%
+  inner_join(temp_df, by = "play_type") %>%
+  mutate(
+    PPP = PPP.x,
+    PPP_delta = PPP.x - PPP.y,
+    PPP_z_score = (PPP.x - PPP.y) / sd(PPP.x - PPP.y),
+    PPP_tot_z_score = (PPP.x - league_ppp) / sd(PPP.x)
+    ) %>%
+  select(-PPP.x, -PPP.y)
+
+team_stats <- team_stats %>%
+  inner_join(temp_df, by = "play_type") %>%
+  mutate(
+    PPP = PPP.x,
+    PPP_delta = PPP.x - PPP.y,
+    PPP_z_score = (PPP.x - PPP.y) / sd(PPP.x - PPP.y),
+    PPP_tot_z_score = (PPP.x - league_ppp) / sd(PPP.x)
+    ) %>%
+  select(-PPP.x, -PPP.y)
+
+# ------------------------------------------------------------------------------
+# Plots 
+# ------------------------------------------------------------------------------
+
+rose_plot <- function(df) {
+  ggplot(
+    df,
+    aes(x = play_type, 
+        y = frequency, 
+        fill = PPP_z_score
+    )
+  ) +
+  geom_bar(stat = "identity") +
+  coord_polar() +
+  scale_fill_gradient2()
+}
+
+rose_plot(player_stats[player_stats$PlayerLastName=="Durant",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Curry",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Irving",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Smart",])
+rose_plot(player_stats[player_stats$PlayerLastName=="Horford",])
+
+
+bos_gsw_df <- team_stats %>%
+  filter(TeamNameAbbreviation %in% c("BOS","GSW"))
+
+
+
+ggplot(
+    bos_gsw_df,
+    aes(x = play_type, 
+        y = frequency, 
+        fill = PPP_tot_z_score)) +
+  geom_bar(stat = "identity") +
+  geom_text(
+    aes(y = frequency - 0.05, 
+        label = ifelse(frequency > 0.10, 
+                       scales::percent(round(frequency,digits = 2)), 
+                       NA))) +
+  coord_polar() +
+  scale_fill_gradient2(low = scales::muted("orange")) +
+  facet_wrap(~TeamNameAbbreviation) +
+  theme_dark() +
+  theme(
+    panel.background = element_rect(fill = "grey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+```
